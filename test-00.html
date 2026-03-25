@@ -12,12 +12,18 @@
             this.binaryMap = [];
             this.rankMap = [];
             this.energyMap = [];
+            this.initialPoints = [];
             this.currentStep = 0;
             this.maxStep = 0;
             this.snapshots = [];
             this.phase = 'init';
 
-            this.cellSize = 30; // Инициализируем РАНЬШЕ создания canvas
+            this.cellSize = 10;
+            this.sigma = 1.5;
+
+            this.moveHistory = [];
+            this.maxHistorySize = 3;
+            this.blockedMoves = new Set();
 
             this.initMaps();
             this.setupCanvas();
@@ -61,6 +67,21 @@
             this.title.style.marginTop = '0';
             this.container.appendChild(this.title);
 
+            const settings = document.createElement('div');
+            settings.innerHTML = `
+            <div style="margin-bottom: 10px;">
+                <label>Sigma: <input type="range" id="sigmaSlider" min="0.5" max="4" step="0.1" value="1.5" style="width: 100px;"></label>
+                <span id="sigmaValue">1.5</span>
+            </div>
+        `;
+            this.container.appendChild(settings);
+
+            document.getElementById('sigmaSlider').addEventListener('input', (e) => {
+                this.sigma = parseFloat(e.target.value);
+                document.getElementById('sigmaValue').textContent = this.sigma.toFixed(1);
+                this.restart();
+            });
+
             this.infoPanel = document.createElement('div');
             this.infoPanel.style.cssText = 'margin-bottom: 15px; padding: 10px; background: #222; border-radius: 5px;';
             this.container.appendChild(this.infoPanel);
@@ -70,11 +91,11 @@
             this.container.appendChild(this.canvasGrid);
 
             this.canvases = {
-                binary: this.createCanvasCell('Binary Map', 'Текущее распределение точек'),
-                rank: this.createCanvasCell('Rank Map', 'Порядок появления'),
-                energy: this.createCanvasCell('Energy Map', 'Энергия каждой точки'),
-                void: this.createCanvasCell('Current Void', 'Текущая пустота'),
-                cluster: this.createCanvasCell('Current Cluster', 'Текущий кластер'),
+                binary: this.createCanvasCell('Binary Map', 'Распределение точек'),
+                rank: this.createCanvasCell('Rank Map', 'Порядок (0=первый, 63=последний)'),
+                energy: this.createCanvasCell('Energy Map', 'Энергия'),
+                void: this.createCanvasCell('Current Void', 'Лучшая пустота'),
+                cluster: this.createCanvasCell('Current Cluster', 'Худший кластер'),
                 histogram: this.createCanvasCell('Histogram', 'Распределение')
             };
 
@@ -84,9 +105,7 @@
                 <strong>Управление:</strong><br>
                 🖱️ <strong>Колесико</strong> - шаг вперед/назад<br>
                 ⏯️ <strong>Пробел</strong> - старт/пауза<br>
-                🔄 <strong>R</strong> - рестарт<br>
-                ⏩ <strong>→</strong> - +10 шагов<br>
-                ⏪ <strong>←</strong> - -10 шагов
+                🔄 <strong>R</strong> - рестарт
             </div>
         `;
             this.container.appendChild(instructions);
@@ -105,7 +124,7 @@
 
             const canvas = document.createElement('canvas');
             const size = this.size;
-            canvas.width = size * this.cellSize; // Теперь this.cellSize определен!
+            canvas.width = size * this.cellSize;
             canvas.height = size * this.cellSize;
             canvas.style.cssText = 'border: 1px solid #444; image-rendering: pixelated;';
             cell.appendChild(canvas);
@@ -164,15 +183,16 @@
         calculateEnergy(x, y, binaryMap) {
             const size = this.size;
             let energy = 0;
+            const sigma = this.sigma;
+            const radius = Math.ceil(sigma * 3);
 
-            for (let dy = -size; dy < size; dy++) {
-                for (let dx = -size; dx < size; dx++) {
+            for (let dy = -radius; dy <= radius; dy++) {
+                for (let dx = -radius; dx <= radius; dx++) {
                     const nx = (x + dx + size) % size;
                     const ny = (y + dy + size) % size;
 
                     if (binaryMap[ny][nx]) {
                         const distSq = dx * dx + dy * dy;
-                        const sigma = size / 4;
                         energy += Math.exp(-distSq / (2 * sigma * sigma));
                     }
                 }
@@ -231,6 +251,47 @@
             return { x: clusterX, y: clusterY, energy: maxEnergy };
         }
 
+        findWorstInitialPoint() {
+            let maxEnergy = -Infinity;
+            let worstX = 0, worstY = 0;
+
+            for (const point of this.initialPoints) {
+                if (this.binaryMap[point.y][point.x]) {
+                    const energy = this.energyMap[point.y][point.x];
+                    if (energy > maxEnergy) {
+                        maxEnergy = energy;
+                        worstX = point.x;
+                        worstY = point.y;
+                    }
+                }
+            }
+
+            return { x: worstX, y: worstY, energy: maxEnergy };
+        }
+
+        isMoveBlocked(fromX, fromY, toX, toY) {
+            const moveKey = `${fromX},${fromY}->${toX},${toY}`;
+            return this.blockedMoves.has(moveKey);
+        }
+
+        recordMove(fromX, fromY, toX, toY) {
+            const moveKey = `${fromX},${fromY}->${toX},${toY}`;
+            const reverseKey = `${toX},${toY}->${fromX},${fromY}`;
+
+            this.moveHistory.push(moveKey);
+            this.blockedMoves.add(reverseKey);
+
+            if (this.moveHistory.length > this.maxHistorySize) {
+                const oldMove = this.moveHistory.shift();
+                this.blockedMoves.delete(oldMove);
+            }
+        }
+
+        clearMoveHistory() {
+            this.moveHistory = [];
+            this.blockedMoves.clear();
+        }
+
         saveSnapshot(action) {
             const snapshot = {
                 binaryMap: this.binaryMap.map(row => [...row]),
@@ -244,30 +305,29 @@
             this.maxStep = this.snapshots.length - 1;
         }
 
-        async generate() {
+        generate() {
             const size = this.size;
             const totalPixels = size * size;
-            const targetFilled = Math.floor(totalPixels / 2); // Ровно половина
+            const targetFilled = Math.floor(totalPixels / 2);
 
-            // Шаг 1: Инициализация РОВНО 50% точек
+            // === PHASE 0: Инициализация 50% белым шумом ===
             let filled = 0;
             let remaining = totalPixels;
             let toFill = targetFilled;
 
             for (let y = 0; y < size; y++) {
                 for (let x = 0; x < size; x++) {
-                    // Динамическая вероятность: toFill / remaining
                     const probability = toFill / remaining;
                     if (Math.random() < probability) {
                         this.binaryMap[y][x] = true;
                         filled++;
                         toFill--;
+                        this.initialPoints.push({x, y});
                     }
                     remaining--;
                 }
             }
 
-            // Если из-за случайности не добились ровно половины, корректируем
             while (filled < targetFilled) {
                 const emptyCells = [];
                 for (let y = 0; y < size; y++) {
@@ -280,25 +340,16 @@
                 if (emptyCells.length > 0) {
                     const randomCell = emptyCells[Math.floor(Math.random() * emptyCells.length)];
                     this.binaryMap[randomCell.y][randomCell.x] = true;
+                    this.initialPoints.push({x: randomCell.x, y: randomCell.y});
                     filled++;
                 }
             }
 
-            // Присваиваем начальные ранги
-            let rank = 0;
-            for (let y = 0; y < size; y++) {
-                for (let x = 0; x < size; x++) {
-                    if (this.binaryMap[y][x]) {
-                        this.rankMap[y][x] = rank++;
-                    }
-                }
-            }
-
             this.updateEnergyMap();
-            this.saveSnapshot(`Initial: ${filled}/${totalPixels} points (50%)`);
+            this.saveSnapshot(`Phase 0: Initial 50% white noise (${filled}/${totalPixels})`);
 
-            // Шаг 2: ОПТИМИЗАЦИЯ текущего распределения (Phase 2)
-            this.phase = 'phase2_optimize';
+            // === PHASE 1: Оптимизация начальных 50% ===
+            this.phase = 'phase1_optimize';
             let improved = true;
             let iteration = 0;
 
@@ -306,61 +357,85 @@
                 improved = false;
                 iteration++;
 
-                for (let i = 0; i < totalPixels / 4; i++) {
+                for (let i = 0; i < targetFilled / 2; i++) {
                     const cluster = this.findCluster();
                     const voidPoint = this.findVoid();
 
+                    if (this.isMoveBlocked(cluster.x, cluster.y, voidPoint.x, voidPoint.y)) {
+                        continue;
+                    }
+
                     if (cluster.energy > voidPoint.energy) {
-                        // Перемещаем точку из кластера в пустоту
                         this.binaryMap[cluster.y][cluster.x] = false;
                         this.binaryMap[voidPoint.y][voidPoint.x] = true;
 
-                        const oldRank = this.rankMap[cluster.y][cluster.x];
-                        this.rankMap[cluster.y][cluster.x] = -1;
-                        this.rankMap[voidPoint.y][voidPoint.x] = oldRank;
+                        const idx = this.initialPoints.findIndex(p => p.x === cluster.x && p.y === cluster.y);
+                        if (idx >= 0) {
+                            this.initialPoints[idx] = {x: voidPoint.x, y: voidPoint.y};
+                        }
 
+                        this.recordMove(cluster.x, cluster.y, voidPoint.x, voidPoint.y);
                         this.updateEnergyMap();
-                        this.saveSnapshot(`Optimize: (${cluster.x},${cluster.y})→(${voidPoint.x},${voidPoint.y}) iter=${iteration}`);
+                        this.saveSnapshot(`Phase 1: Optimize (${cluster.x},${cluster.y})→(${voidPoint.x},${voidPoint.y})`);
                         improved = true;
                     }
                 }
+                this.clearMoveHistory();
             }
 
-            // Шаг 3: ЗАПОЛНЕНИЕ оставшихся пустот (Phase 1)
-            this.phase = 'phase1_fill';
+            // === PHASE 2: Заполнение пустот (ранги 32 → 63) ===
+            this.phase = 'phase2_fill';
+            let rank = Math.floor(totalPixels / 2);
+
             while (rank < totalPixels) {
                 const voidPoint = this.findVoid();
+                console.log (`void energy: ${voidPoint.energy}`);
+
+                // Просто добавляем точку и присваиваем ранг
                 this.binaryMap[voidPoint.y][voidPoint.x] = true;
-                this.rankMap[voidPoint.y][voidPoint.x] = rank++;
+                this.rankMap[voidPoint.y][voidPoint.x] = rank;
 
                 this.updateEnergyMap();
-                this.saveSnapshot(`Fill: Added void at (${voidPoint.x}, ${voidPoint.y}) rank=${rank-1}`);
+                this.saveSnapshot(`Phase 2: Fill rank ${rank} at (${voidPoint.x}, ${voidPoint.y})`);
 
-                // После добавления каждой точки делаем мини-оптимизацию
-                if (rank % 8 === 0) {
-                    for (let i = 0; i < totalPixels / 2; i++) {
-                        const cluster = this.findCluster();
-                        const newVoid = this.findVoid();
+                rank++;
+                // ❌ УБРАЛИ оптимизацию - она ломала присвоение рангов
+            }
 
-                        if (cluster.energy > newVoid.energy) {
-                            this.binaryMap[cluster.y][cluster.x] = false;
-                            this.binaryMap[newVoid.y][newVoid.x] = true;
+            // === PHASE 3: Удаление начальных 50% (ранги 31 → 0) ===
+            this.phase = 'phase3_remove';
+            rank = Math.floor(totalPixels / 2) - 1;
 
-                            const oldRank = this.rankMap[cluster.y][cluster.x];
-                            this.rankMap[cluster.y][cluster.x] = -1;
-                            this.rankMap[newVoid.y][newVoid.x] = oldRank;
+            while (rank >= 0) {
+                const worstPoint = this.findWorstInitialPoint();
+                console.log (`cluster energy: ${worstPoint.energy}`);
 
-                            this.updateEnergyMap();
-                            this.saveSnapshot(`Fill+Optimize: (${cluster.x},${cluster.y})→(${newVoid.x},${newVoid.y})`);
-                        }
-                    }
-                }
+                // Просто удаляем точку и присваиваем ранг
+                this.binaryMap[worstPoint.y][worstPoint.x] = false;
+                this.rankMap[worstPoint.y][worstPoint.x] = rank;
+
+                this.updateEnergyMap();
+                this.saveSnapshot(`Phase 3: Remove rank ${rank} at (${worstPoint.x}, ${worstPoint.y})`);
+
+                rank--;
+                // ❌ УБРАЛИ оптимизацию - она ломала присвоение рангов
             }
 
             this.phase = 'done';
-            this.saveSnapshot('Generation complete!');
+            this.saveSnapshot('Generation complete! Blue noise texture ready.');
 
             console.log(`Total steps: ${this.maxStep}`);
+
+            // Проверка: все ли ячейки имеют ранг
+            let missingRanks = 0;
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    if (this.rankMap[y][x] === -1) {
+                        missingRanks++;
+                    }
+                }
+            }
+            console.log(`Missing ranks: ${missingRanks} (должно быть 0)`);
         }
 
         stepForward() {
@@ -398,6 +473,9 @@
             this.maxStep = 0;
             this.snapshots = [];
             this.phase = 'init';
+            this.initialPoints = [];
+            this.moveHistory = [];
+            this.blockedMoves.clear();
             this.initMaps();
             this.generate();
             this.render();
@@ -410,12 +488,15 @@
             const total = this.size * this.size;
             const density = (filled / total * 100).toFixed(1);
 
+            const ranksAssigned = this.rankMap.flat().filter(r => r >= 0).length;
+
             this.infoPanel.innerHTML = `
             <div><strong>Step:</strong> ${this.currentStep} / ${this.maxStep}</div>
             <div><strong>Phase:</strong> ${this.phase}</div>
             <div><strong>Action:</strong> ${snapshot ? snapshot.action : 'N/A'}</div>
             <div><strong>Density:</strong> ${filled}/${total} (${density}%)</div>
-            <div><strong>Auto-play:</strong> ${this.autoPlay ? 'ON' : 'OFF'}</div>
+            <div><strong>Ranks:</strong> ${ranksAssigned}/${total}</div>
+            <div><strong>Sigma:</strong> ${this.sigma}</div>
         `;
         }
 
@@ -441,7 +522,8 @@
                     const py = y * cellSize;
 
                     if (this.binaryMap[y][x]) {
-                        ctx.fillStyle = '#00ff00';
+                        const isInitial = this.initialPoints.some(p => p.x === x && p.y === y);
+                        ctx.fillStyle = isInitial ? '#00ff00' : '#0088ff';
                         ctx.fillRect(px + 2, py + 2, cellSize - 4, cellSize - 4);
                     } else {
                         ctx.fillStyle = '#1a1a1a';
@@ -482,7 +564,7 @@
                         ctx.textBaseline = 'middle';
                         ctx.fillText(rank.toString(), px + cellSize / 2, py + cellSize / 2);
                     } else {
-                        ctx.fillStyle = '#1a1a1a';
+                        ctx.fillStyle = '#331111';
                         ctx.fillRect(px + 1, py + 1, cellSize - 2, cellSize - 2);
                     }
 
@@ -598,7 +680,7 @@
     }
 
     // Инициализация
-    const dbg = new VoidAndClusterDebugger(8);
+    const dbg = new VoidAndClusterDebugger(32);
     dbg.generate();
     dbg.render();
 </script>

@@ -5,36 +5,48 @@
     <title>Title</title>
 </head>
 <body>
+<div>ЭТОТ <b>СИНИЙ ШУМ</b> ПРОСТО <b>ИМБА</b>!</div>
+<canvas id="canvas" width="1024" height="1024" style="width: 1024px; height: 1024px"></canvas>
 <script>
     class VoidAndClusterGenerator {
-        constructor (size) {
+        constructor (size, sigma = 1.5) {
             this.size = size;
-            this.staticSigma = 1.5;
+            this.staticSigma = sigma;
             this.valueMap  = Array.from ({length: size}, () => Array (size).fill (0));
             this.energyMap = Array.from ({length: size}, () => Array (size).fill (0));
             this.rankMap   = Array.from ({length: size}, () => Array (size).fill (-1));
-            this.randCache = Array.from ({length: size}, () => Array.from ({length: size}, () => Math.random () * 1e-6));
+            this.randomMap = Array.from ({length: size}, () => Array.from ({length: size}, () => Math.random () * 1e-6));
         }
 
         generate () {
             this.genWhiteNoise ();
             this.optimize ();
-            this.sparsePhase ('remove', Math.floor (this.size * this.size / 2) - 1, 0);
-            this.sparsePhase ('fill'  , Math.floor (this.size * this.size / 2), this.size * this.size);
+            this.sparsePhase (false);
+            this.restoreInverted ();
+            this.sparsePhase (true);
             this.normalize ();
         }
 
-        // Энергия точки: если передан массив точек — считаем только для них
-        calcEnergy (x, y, sigma, points = null) {
+        restoreInverted () {
+            const size = this.size;
+            for (let x = 0; x < size; x++)
+            for (let y = 0; y < size; y++) this.valueMap [x] [y] = this.rankMap [x] [y] === -1 ? 1 : 0;
+            // то есть у нас теперь единицы стоят там где порядок еще не присвоен
+            this.updateAllEnergy (this.staticSigma);
+        }
+
+        // при слишком большой длине массива алгоритм предпочтет обойти карту
+        // мы никогда не передаем массив с дырками, потому что оно посчитает их как заполнения и нарушит порядок
+        // это одна из причин зачем я восстанавливаю инвертированный массив
+        updateEnergy (x, y, sigma, points = null) {
             const size = this.size;
             let e = 0;
             const r = Math.ceil (sigma * 3);
 
-            if (points && points.length < r*r) {
-                // Разреженный режим: перебираем только заданные точки
+            if (points && points.length * 20 < 3 * r * r + 1000) {
+                // обход входного массива
                 for (const {x: px, y: py} of points) {
                     let dx = px - x, dy = py - y;
-                    // Учитываем зацикливание
                     if (dx >  size / 2) dx -= size;
                     if (dx < -size / 2) dx += size;
                     if (dy >  size / 2) dy -= size;
@@ -42,13 +54,14 @@
                     const d2 = dx * dx + dy * dy;
                     e += Math.exp (-d2 / (2 * sigma * sigma));
                 }
-            } else {
-                // Плотный режим: полный обход окрестности
+            }
+            else {
+                // обход окрестности
                 for (let dx = -r; dx <= r; dx++)
                 for (let dy = -r; dy <= r; dy++) {
                     const nx = (x + dx + size) % size;
                     const ny = (y + dy + size) % size;
-                    if (this.valueMap[nx][ny]) {
+                    if (this.valueMap [nx] [ny]) {
                         const d2 = dx * dx + dy * dy;
                         e += Math.exp (-d2 / (2 * sigma * sigma));
                     }
@@ -57,37 +70,38 @@
             return e;
         }
 
-        // Полный пересчёт энергии для массива точек (или всех)
+        // полный пересчёт энергии для всех точек карты или входного массива
         updateAllEnergy (sigma, points = null) {
             const size = this.size;
             if (points) {
                 for (const {x, y} of points) {
-                    this.energyMap[x][y] = this.calcEnergy (x, y, sigma, points) + this.randCache[x][y];
+                    this.energyMap [x] [y] = this.updateEnergy (x, y, sigma, points) + this.randomMap [x] [y];
                 }
-            } else {
+            }
+            else {
                 for (let x = 0; x < size; x++)
                 for (let y = 0; y < size; y++) {
-                    this.energyMap[x][y] = this.calcEnergy (x, y, sigma) + this.randCache[x][y];
+                    this.energyMap [x] [y] = this.updateEnergy (x, y, sigma) + this.randomMap [x] [y];
                 }
             }
         }
 
+        // при слишком большой длине массива обходит пространство как обычно
         flip (x, y, sigma, points = null) {
             const size = this.size;
-            const delta = this.valueMap[x][y] ? -1 : 1;
-            this.valueMap[x][y] = this.valueMap[x][y] ? 0 : 1;
+            const delta = this.valueMap [x] [y] ? -1 : 1;
+            this.valueMap [x] [y] = this.valueMap [x] [y] ? 0 : 1;
             const r = Math.ceil (sigma * 3);
 
-            if (points && points.length < r*r) {
+            if (points && points.length * 20 < 3 * r * r + 1000) {
                 for (const {x: px, y: py} of points) {
                     let dx = px - x, dy = py - y;
-                    // Учитываем зацикливание
                     if (dx >  size / 2) dx -= size;
                     if (dx < -size / 2) dx += size;
                     if (dy >  size / 2) dy -= size;
                     if (dy < -size / 2) dy += size;
                     const d2 = dx * dx + dy * dy;
-                    this.energyMap[px][py] += delta * Math.exp (-d2 / (2 * sigma * sigma));
+                    this.energyMap [px] [py] += delta * Math.exp (-d2 / (2 * sigma * sigma));
                 }
             }
             else {
@@ -95,19 +109,20 @@
                 for (let dy = -r; dy <= r; dy++) {
                     const nx = (x + dx + size) % size;
                     const ny = (y + dy + size) % size;
+                    if (points && !this.valueMap [nx] [ny]) continue; // массив - признак того чтобы не трогать пустоту
                     const d2 = dx * dx + dy * dy;
-                    this.energyMap[nx][ny] += delta * Math.exp (-d2 / (2 * sigma * sigma));
+                    this.energyMap [nx] [ny] += delta * Math.exp (-d2 / (2 * sigma * sigma));
                 }
             }
         }
 
         genWhiteNoise () {
             const size = this.size;
-            let total = size * size, need = total / 2;
+            let total = size * size, need = total >> 1; // целое число, для нечетных размеров
             for (let x = 0; x < size; x++)
             for (let y = 0; y < size; y++) {
                 if (Math.random () * total < need) {
-                    this.valueMap[x][y] = 1;
+                    this.valueMap [x] [y] = 1;
                     need--;
                 }
                 total--;
@@ -120,152 +135,112 @@
             let vx, vy, ve = Infinity, cx, cy, ce = -Infinity;
             for (let x = 0; x < size; x++)
             for (let y = 0; y < size; y++) {
-                const e = this.energyMap[x][y]; // рандом уже закеширован в energyMap
-                if (this.valueMap[x][y]) {
-                    if (e > ce) [cx, cy, ce] = [x, y, e];
-                } else {
-                    if (e < ve) [vx, vy, ve] = [x, y, e];
-                }
+                const e = this.energyMap [x] [y];
+                if (this.valueMap [x] [y]) { if (e > ce) [cx, cy, ce] = [x, y, e]; }
+                else                       { if (e < ve) [vx, vy, ve] = [x, y, e]; }
             }
             return {vx, vy, ve, cx, cy, ce};
         }
 
         optimize () {
-            let last = null;
-            for (let i = 0; i < 1000; i++) {
+            // провел много тестов, за 7.7% ни разу не вышло, кроме того это не очень критично
+            // при лимите в 2 раза меньше необходимого иногда заметно что шум белее чем должен быть
+            for (let i = 0, limit = 0.08 * this.size * this.size, last = null; i < limit; i++) {
                 const m = this.findPair ();
-                if (m.ve >= m.ce) break;
-                if (last && m.vx === last.cx && m.vy === last.cy && m.cx === last.vx && m.cy === last.vy) break;
+                if (m.ve >= m.ce) return;
+                if (last && m.vx === last.cx && m.vy === last.cy && m.cx === last.vx && m.cy === last.vy) return;
                 this.flip (m.vx, m.vy, this.staticSigma);
                 this.flip (m.cx, m.cy, this.staticSigma);
                 last = m;
             }
+            console.warn (`limit reached`);
         }
 
-        // Поиск экстремума в массиве точек
-        findExtreme (points, findMin) {
-            let bx, by, be = findMin ? Infinity : -Infinity, bi = -1;
+        // функция всегда только удаляет максимумы
+        // для фазы заполнения массив восстанавливается инвертированным
+        // параметр fill (фаза заполнения или нет) влияет только на упорядочивание
+        sparsePhase (fill) {
+            let size = this.size;
+            let total = size * size;
+
+            let points = [];
+            for (let x = 0; x < size; x++)
+            for (let y = 0; y < size; y++) {
+                if (this.valueMap [x] [y]) points.push ({x, y});
+            }
+            let sigma = this.staticSigma;
+            let updateAt = total / 4;
+            let smoothPhaseAt = 128;
+
+            while (points.length > smoothPhaseAt) {
+                const {x, y, _, i} = this.findCluster (points);
+                this.rankMap [x] [y] = fill ? total - points.length : points.length - 1;
+                points [i] = points.at (-1);
+                points.pop ();
+
+                if (points.length <= updateAt) {
+                    sigma = this.staticSigma * Math.sqrt (0.5 * size * size / points.length);
+                    updateAt = Math.max (updateAt / 2, smoothPhaseAt);
+                    this.updateAllEnergy (sigma, points);
+                }
+                else {
+                    this.flip (x, y, sigma, points);
+                }
+            }
+            while (points.length) {
+                const {x, y, _, i} = this.findCluster (points);
+                this.rankMap [x] [y] = fill ? total - points.length : points.length - 1;
+                points [i] = points.at (-1);
+                points.pop ();
+
+                sigma = this.staticSigma * Math.sqrt (0.5 * size * size / points.length);
+                this.updateAllEnergy (sigma, points);
+            }
+        }
+
+        // поиск максимума в массиве точек
+        findCluster (points) {
+            let bx, by, be = -Infinity, bi = -1;
             for (let i = 0; i < points.length; i++) {
-                const {x, y} = points[i];
-                const e = this.energyMap[x][y];
-                if (findMin ? e < be : e > be) [bx, by, be, bi] = [x, y, e, i];
+                const {x, y} = points [i];
+                const e = this.energyMap [x] [y];
+                if (e > be) [bx, by, be, bi] = [x, y, e, i];
             }
-            return {x: bx, y: by, e: be, idx: bi};
-        }
-
-        // Универсальная фаза: удаление или заполнение с разреженной оптимизацией
-        sparsePhase (mode, startRank, endRank) {
-            const size = this.size;
-            const total = size * size;
-            const isRemove = mode === 'remove';
-
-            // Порог перехода в разреженный режим: когда точек < 25% от размера
-            const sparseThreshold = size * size * 0.25;
-            let points = null; // null = плотный режим, иначе массив {x,y}
-
-            // Стадии сигм: [сигма, итераций оптимизации на шаг]
-            const sigmaStages = [
-                {sigma: 1.5, iters: 20},
-                {sigma: 3, iters: 15},
-                {sigma: 6, iters: 10},
-                {sigma: 12, iters: 5},
-                {sigma: 24, iters: 3}
-            ];
-
-            let rank = startRank;
-            const step = isRemove ? -1 : 1;
-            const targetCount = Math.abs (endRank - startRank) + 1;
-
-            for (let processed = 0; processed < targetCount; processed++, rank += step) {
-                const count = isRemove ? rank + 1 : rank + 1;
-                const density = count / total;
-
-                // Выбор сигмы по стадии (индекс на основе плотности)
-                const stageIdx = Math.min (
-                    Math.floor ((1 - Math.abs (density - 0.5) * 2) * sigmaStages.length),
-                    sigmaStages.length - 1
-                );
-                const {sigma, iters} = sigmaStages[stageIdx];
-
-                // Переход в разреженный режим
-                if (!points && count < sparseThreshold) {
-                    points = [];
-                    for (let x = 0; x < size; x++)
-                        for (let y = 0; y < size; y++) {
-                            const isActive = isRemove ? (this.initial?.[x]?.[y] && this.valueMap[x][y])
-                                : (!this.valueMap[x][y]);
-                            // Для remove: ищем initial-точки, для fill: пустоты
-                            // Но initial убран, поэтому для remove просто ищем точки с рангом >= текущим
-                            if (isRemove) {
-                                if (this.valueMap[x][y] && this.rankMap[x][y] === -1) {
-                                    points.push ({x, y});
-                                }
-                            } else {
-                                if (!this.valueMap[x][y]) {
-                                    points.push ({x, y});
-                                }
-                            }
-                        }
-                    this.updateAllEnergy (sigma, points);
-                }
-
-                // Периодический полный пересчёт при смене сигмы или переходе в sparse
-                if (processed % 20 === 0 || !points) {
-                    this.updateAllEnergy (sigma, points);
-                }
-
-                // Поиск и применение
-                if (points) {
-                    const ext = this.findExtreme (points, !isRemove); // void=min, cluster=max
-                    if (ext.idx >= 0) {
-                        const {x, y} = points[ext.idx];
-                        if (isRemove) {
-                            this.flip (x, y, sigma, points);
-                            points.splice (ext.idx, 1); // удаляем из массива
-                        } else {
-                            this.flip (x, y, sigma, points);
-                            points.splice (ext.idx, 1); // точка больше не пустота
-                        }
-                        this.valueMap[x][y] = isRemove ? 0 : 1;
-                        this.rankMap[x][y] = rank;
-                    }
-                } else {
-                    const m = this.findPair ();
-                    const [px, py] = isRemove ? [m.cx, m.cy] : [m.vx, m.vy];
-                    this.flip (px, py);
-                    this.valueMap[px][py] = isRemove ? 0 : 1;
-                    this.rankMap[px][py] = rank;
-                }
-            }
-        }
-
-        // Вспомогательные для sparsePhase (если нужна оптимизация внутри)
-        findBestVoid (sigma, points) {
-            return this.findExtreme (points, true);
-        }
-
-        findWorstCluster (sigma, points) {
-            return this.findExtreme (points, false);
+            return {x: bx, y: by, e: be, i: bi};
         }
 
         normalize () {
             const size = this.size;
-            const max = size * size - 1;
+            const total = size * size;
             for (let x = 0; x < size; x++)
             for (let y = 0; y < size; y++) {
-                this.valueMap[x][y] = this.rankMap[x][y] / max;
+                this.valueMap [x] [y] = this.rankMap [x] [y] / total;
             }
         }
     }
 
-    // Использование
-    const gen = new VoidAndClusterGenerator (32);
+    let size = 200;
+    const gen = new VoidAndClusterGenerator (size, 1.5);
     gen.generate ();
+    const ctx = document.getElementById ('canvas').getContext('2d');
+    for (let x = 0; x < size; x++)
+    for (let y = 0; y < size; y++) {
+        if (gen.rankMap [x] [y] < 0) {
+            ctx.fillStyle = 'magenta';
+        }
+        else {
+            // const gray = Math.floor (gen.valueMap [x] [y] * 256);
+            // ctx.fillStyle = `rgb(${gray}, ${gray}, ${gray})`;
 
-    // Проверка спавна
-    function shouldSpawn (x, y, threshold = 0.5) {
-        const size = gen.size;
-        return gen.valueMap[x % size][y % size] > threshold;
+            // const threshold = 0.001;
+            // ctx.fillStyle = threshold < gen.valueMap [x] [y] ? 'skyblue' : 'blue';
+
+            const gradient = y / size;
+            ctx.fillStyle = gradient < gen.valueMap [x] [y] ? 'skyblue' : 'blue';
+
+            // ctx.fillStyle = 'black';
+        }
+        ctx.fillRect (x * 3, y * 3, 3, 3);
     }
 </script>
 </body>
