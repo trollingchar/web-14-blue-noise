@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+<script>
+    class VoidAndClusterDebugger {
+        constructor(size = 8) {
+            this.size = size;
+            this.binaryMap = [];
+            this.rankMap = [];
+            this.energyMap = [];
+            this.currentStep = 0;
+            this.maxStep = 0;
+            this.snapshots = [];
+            this.phase = 'init';
+
+            this.cellSize = 30; // Инициализируем РАНЬШЕ создания canvas
+
+            this.initMaps();
+            this.setupCanvas();
+            this.setupControls();
+        }
+
+        initMaps() {
+            const size = this.size;
+
+            for (let y = 0; y < size; y++) {
+                this.binaryMap[y] = [];
+                this.rankMap[y] = [];
+                this.energyMap[y] = [];
+                for (let x = 0; x < size; x++) {
+                    this.binaryMap[y][x] = false;
+                    this.rankMap[y][x] = -1;
+                    this.energyMap[y][x] = 0;
+                }
+            }
+        }
+
+        setupCanvas() {
+            this.container = document.createElement('div');
+            this.container.style.cssText = `
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.9);
+            color: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            font-family: monospace;
+            z-index: 1000;
+            max-height: 95vh;
+            overflow-y: auto;
+        `;
+            document.body.appendChild(this.container);
+
+            this.title = document.createElement('h3');
+            this.title.textContent = 'Void-and-Cluster Debugger';
+            this.title.style.marginTop = '0';
+            this.container.appendChild(this.title);
+
+            this.infoPanel = document.createElement('div');
+            this.infoPanel.style.cssText = 'margin-bottom: 15px; padding: 10px; background: #222; border-radius: 5px;';
+            this.container.appendChild(this.infoPanel);
+
+            this.canvasGrid = document.createElement('div');
+            this.canvasGrid.style.cssText = 'display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 15px;';
+            this.container.appendChild(this.canvasGrid);
+
+            this.canvases = {
+                binary: this.createCanvasCell('Binary Map', 'Текущее распределение точек'),
+                rank: this.createCanvasCell('Rank Map', 'Порядок появления'),
+                energy: this.createCanvasCell('Energy Map', 'Энергия каждой точки'),
+                void: this.createCanvasCell('Current Void', 'Текущая пустота'),
+                cluster: this.createCanvasCell('Current Cluster', 'Текущий кластер'),
+                histogram: this.createCanvasCell('Histogram', 'Распределение')
+            };
+
+            const instructions = document.createElement('div');
+            instructions.innerHTML = `
+            <div style="margin-top: 15px; padding: 10px; background: #333; border-radius: 5px;">
+                <strong>Управление:</strong><br>
+                🖱️ <strong>Колесико</strong> - шаг вперед/назад<br>
+                ⏯️ <strong>Пробел</strong> - старт/пауза<br>
+                🔄 <strong>R</strong> - рестарт<br>
+                ⏩ <strong>→</strong> - +10 шагов<br>
+                ⏪ <strong>←</strong> - -10 шагов
+            </div>
+        `;
+            this.container.appendChild(instructions);
+
+            this.updateInfo();
+        }
+
+        createCanvasCell(title, description) {
+            const cell = document.createElement('div');
+            cell.style.cssText = 'background: #1a1a1a; padding: 10px; border-radius: 5px;';
+
+            const label = document.createElement('div');
+            label.style.cssText = 'font-size: 12px; margin-bottom: 5px; color: #aaa;';
+            label.innerHTML = `<strong>${title}</strong><br><small>${description}</small>`;
+            cell.appendChild(label);
+
+            const canvas = document.createElement('canvas');
+            const size = this.size;
+            canvas.width = size * this.cellSize; // Теперь this.cellSize определен!
+            canvas.height = size * this.cellSize;
+            canvas.style.cssText = 'border: 1px solid #444; image-rendering: pixelated;';
+            cell.appendChild(canvas);
+
+            this.canvasGrid.appendChild(cell);
+            return canvas;
+        }
+
+        setupControls() {
+            window.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                if (e.deltaY < 0) {
+                    this.stepBackward();
+                } else {
+                    this.stepForward();
+                }
+            }, { passive: false });
+
+            window.addEventListener('keydown', (e) => {
+                switch(e.code) {
+                    case 'Space':
+                        e.preventDefault();
+                        this.toggleAutoPlay();
+                        break;
+                    case 'KeyR':
+                        this.restart();
+                        break;
+                    case 'ArrowRight':
+                        e.preventDefault();
+                        for (let i = 0; i < 10; i++) this.stepForward();
+                        break;
+                    case 'ArrowLeft':
+                        e.preventDefault();
+                        for (let i = 0; i < 10; i++) this.stepBackward();
+                        break;
+                }
+            });
+
+            this.autoPlay = false;
+            this.autoPlayInterval = null;
+        }
+
+        toggleAutoPlay() {
+            this.autoPlay = !this.autoPlay;
+            if (this.autoPlay) {
+                this.autoPlayInterval = setInterval(() => {
+                    if (!this.stepForward()) {
+                        this.toggleAutoPlay();
+                    }
+                }, 200);
+            } else {
+                clearInterval(this.autoPlayInterval);
+            }
+        }
+
+        calculateEnergy(x, y, binaryMap) {
+            const size = this.size;
+            let energy = 0;
+
+            for (let dy = -size; dy < size; dy++) {
+                for (let dx = -size; dx < size; dx++) {
+                    const nx = (x + dx + size) % size;
+                    const ny = (y + dy + size) % size;
+
+                    if (binaryMap[ny][nx]) {
+                        const distSq = dx * dx + dy * dy;
+                        const sigma = size / 4;
+                        energy += Math.exp(-distSq / (2 * sigma * sigma));
+                    }
+                }
+            }
+
+            return energy;
+        }
+
+        updateEnergyMap() {
+            for (let y = 0; y < this.size; y++) {
+                for (let x = 0; x < this.size; x++) {
+                    this.energyMap[y][x] = this.calculateEnergy(x, y, this.binaryMap);
+                }
+            }
+        }
+
+        findVoid() {
+            const size = this.size;
+            let minEnergy = Infinity;
+            let voidX = 0, voidY = 0;
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    if (!this.binaryMap[y][x]) {
+                        const energy = this.energyMap[y][x];
+                        if (energy < minEnergy) {
+                            minEnergy = energy;
+                            voidX = x;
+                            voidY = y;
+                        }
+                    }
+                }
+            }
+
+            return { x: voidX, y: voidY, energy: minEnergy };
+        }
+
+        findCluster() {
+            const size = this.size;
+            let maxEnergy = -Infinity;
+            let clusterX = 0, clusterY = 0;
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    if (this.binaryMap[y][x]) {
+                        const energy = this.energyMap[y][x];
+                        if (energy > maxEnergy) {
+                            maxEnergy = energy;
+                            clusterX = x;
+                            clusterY = y;
+                        }
+                    }
+                }
+            }
+
+            return { x: clusterX, y: clusterY, energy: maxEnergy };
+        }
+
+        saveSnapshot(action) {
+            const snapshot = {
+                binaryMap: this.binaryMap.map(row => [...row]),
+                rankMap: this.rankMap.map(row => [...row]),
+                energyMap: this.energyMap.map(row => [...row]),
+                phase: this.phase,
+                action: action,
+                step: this.currentStep
+            };
+            this.snapshots.push(snapshot);
+            this.maxStep = this.snapshots.length - 1;
+        }
+
+        async generate() {
+            const size = this.size;
+            const totalPixels = size * size;
+            const targetFilled = Math.floor(totalPixels / 2); // Ровно половина
+
+            // Шаг 1: Инициализация РОВНО 50% точек
+            let filled = 0;
+            let remaining = totalPixels;
+            let toFill = targetFilled;
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    // Динамическая вероятность: toFill / remaining
+                    const probability = toFill / remaining;
+                    if (Math.random() < probability) {
+                        this.binaryMap[y][x] = true;
+                        filled++;
+                        toFill--;
+                    }
+                    remaining--;
+                }
+            }
+
+            // Если из-за случайности не добились ровно половины, корректируем
+            while (filled < targetFilled) {
+                const emptyCells = [];
+                for (let y = 0; y < size; y++) {
+                    for (let x = 0; x < size; x++) {
+                        if (!this.binaryMap[y][x]) {
+                            emptyCells.push({x, y});
+                        }
+                    }
+                }
+                if (emptyCells.length > 0) {
+                    const randomCell = emptyCells[Math.floor(Math.random() * emptyCells.length)];
+                    this.binaryMap[randomCell.y][randomCell.x] = true;
+                    filled++;
+                }
+            }
+
+            // Присваиваем начальные ранги
+            let rank = 0;
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    if (this.binaryMap[y][x]) {
+                        this.rankMap[y][x] = rank++;
+                    }
+                }
+            }
+
+            this.updateEnergyMap();
+            this.saveSnapshot(`Initial: ${filled}/${totalPixels} points (50%)`);
+
+            // Шаг 2: ОПТИМИЗАЦИЯ текущего распределения (Phase 2)
+            this.phase = 'phase2_optimize';
+            let improved = true;
+            let iteration = 0;
+
+            while (improved && iteration < 30) {
+                improved = false;
+                iteration++;
+
+                for (let i = 0; i < totalPixels / 4; i++) {
+                    const cluster = this.findCluster();
+                    const voidPoint = this.findVoid();
+
+                    if (cluster.energy > voidPoint.energy) {
+                        // Перемещаем точку из кластера в пустоту
+                        this.binaryMap[cluster.y][cluster.x] = false;
+                        this.binaryMap[voidPoint.y][voidPoint.x] = true;
+
+                        const oldRank = this.rankMap[cluster.y][cluster.x];
+                        this.rankMap[cluster.y][cluster.x] = -1;
+                        this.rankMap[voidPoint.y][voidPoint.x] = oldRank;
+
+                        this.updateEnergyMap();
+                        this.saveSnapshot(`Optimize: (${cluster.x},${cluster.y})→(${voidPoint.x},${voidPoint.y}) iter=${iteration}`);
+                        improved = true;
+                    }
+                }
+            }
+
+            // Шаг 3: ЗАПОЛНЕНИЕ оставшихся пустот (Phase 1)
+            this.phase = 'phase1_fill';
+            while (rank < totalPixels) {
+                const voidPoint = this.findVoid();
+                this.binaryMap[voidPoint.y][voidPoint.x] = true;
+                this.rankMap[voidPoint.y][voidPoint.x] = rank++;
+
+                this.updateEnergyMap();
+                this.saveSnapshot(`Fill: Added void at (${voidPoint.x}, ${voidPoint.y}) rank=${rank-1}`);
+
+                // После добавления каждой точки делаем мини-оптимизацию
+                if (rank % 8 === 0) {
+                    for (let i = 0; i < totalPixels / 2; i++) {
+                        const cluster = this.findCluster();
+                        const newVoid = this.findVoid();
+
+                        if (cluster.energy > newVoid.energy) {
+                            this.binaryMap[cluster.y][cluster.x] = false;
+                            this.binaryMap[newVoid.y][newVoid.x] = true;
+
+                            const oldRank = this.rankMap[cluster.y][cluster.x];
+                            this.rankMap[cluster.y][cluster.x] = -1;
+                            this.rankMap[newVoid.y][newVoid.x] = oldRank;
+
+                            this.updateEnergyMap();
+                            this.saveSnapshot(`Fill+Optimize: (${cluster.x},${cluster.y})→(${newVoid.x},${newVoid.y})`);
+                        }
+                    }
+                }
+            }
+
+            this.phase = 'done';
+            this.saveSnapshot('Generation complete!');
+
+            console.log(`Total steps: ${this.maxStep}`);
+        }
+
+        stepForward() {
+            if (this.currentStep < this.maxStep) {
+                this.currentStep++;
+                this.loadSnapshot(this.currentStep);
+                this.render();
+                this.updateInfo();
+                return true;
+            }
+            return false;
+        }
+
+        stepBackward() {
+            if (this.currentStep > 0) {
+                this.currentStep--;
+                this.loadSnapshot(this.currentStep);
+                this.render();
+                this.updateInfo();
+                return true;
+            }
+            return false;
+        }
+
+        loadSnapshot(index) {
+            const snapshot = this.snapshots[index];
+            this.binaryMap = snapshot.binaryMap.map(row => [...row]);
+            this.rankMap = snapshot.rankMap.map(row => [...row]);
+            this.energyMap = snapshot.energyMap.map(row => [...row]);
+            this.phase = snapshot.phase;
+        }
+
+        restart() {
+            this.currentStep = 0;
+            this.maxStep = 0;
+            this.snapshots = [];
+            this.phase = 'init';
+            this.initMaps();
+            this.generate();
+            this.render();
+            this.updateInfo();
+        }
+
+        updateInfo() {
+            const snapshot = this.snapshots[this.currentStep];
+            const filled = this.binaryMap.flat().filter(v => v).length;
+            const total = this.size * this.size;
+            const density = (filled / total * 100).toFixed(1);
+
+            this.infoPanel.innerHTML = `
+            <div><strong>Step:</strong> ${this.currentStep} / ${this.maxStep}</div>
+            <div><strong>Phase:</strong> ${this.phase}</div>
+            <div><strong>Action:</strong> ${snapshot ? snapshot.action : 'N/A'}</div>
+            <div><strong>Density:</strong> ${filled}/${total} (${density}%)</div>
+            <div><strong>Auto-play:</strong> ${this.autoPlay ? 'ON' : 'OFF'}</div>
+        `;
+        }
+
+        render() {
+            this.renderBinaryMap();
+            this.renderRankMap();
+            this.renderEnergyMap();
+            this.renderCurrentPoints();
+            this.renderHistogram();
+        }
+
+        renderBinaryMap() {
+            const canvas = this.canvases.binary;
+            const ctx = canvas.getContext('2d');
+            const size = this.size;
+            const cellSize = this.cellSize;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const px = x * cellSize;
+                    const py = y * cellSize;
+
+                    if (this.binaryMap[y][x]) {
+                        ctx.fillStyle = '#00ff00';
+                        ctx.fillRect(px + 2, py + 2, cellSize - 4, cellSize - 4);
+                    } else {
+                        ctx.fillStyle = '#1a1a1a';
+                        ctx.fillRect(px + 2, py + 2, cellSize - 4, cellSize - 4);
+                    }
+
+                    ctx.strokeStyle = '#444';
+                    ctx.strokeRect(px, py, cellSize, cellSize);
+                }
+            }
+        }
+
+        renderRankMap() {
+            const canvas = this.canvases.rank;
+            const ctx = canvas.getContext('2d');
+            const size = this.size;
+            const cellSize = this.cellSize;
+            const maxRank = size * size - 1;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const px = x * cellSize;
+                    const py = y * cellSize;
+                    const rank = this.rankMap[y][x];
+
+                    if (rank >= 0) {
+                        const normalized = rank / maxRank;
+                        const r = Math.floor(normalized * 255);
+                        const b = Math.floor((1 - normalized) * 255);
+                        ctx.fillStyle = `rgb(${r}, 100, ${b})`;
+                        ctx.fillRect(px + 1, py + 1, cellSize - 2, cellSize - 2);
+
+                        ctx.fillStyle = '#fff';
+                        ctx.font = '10px monospace';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(rank.toString(), px + cellSize / 2, py + cellSize / 2);
+                    } else {
+                        ctx.fillStyle = '#1a1a1a';
+                        ctx.fillRect(px + 1, py + 1, cellSize - 2, cellSize - 2);
+                    }
+
+                    ctx.strokeStyle = '#444';
+                    ctx.strokeRect(px, py, cellSize, cellSize);
+                }
+            }
+        }
+
+        renderEnergyMap() {
+            const canvas = this.canvases.energy;
+            const ctx = canvas.getContext('2d');
+            const size = this.size;
+            const cellSize = this.cellSize;
+
+            let maxEnergy = 0;
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    maxEnergy = Math.max(maxEnergy, this.energyMap[y][x]);
+                }
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const px = x * cellSize;
+                    const py = y * cellSize;
+                    const energy = this.energyMap[y][x];
+                    const normalized = maxEnergy > 0 ? energy / maxEnergy : 0;
+
+                    const intensity = Math.floor(normalized * 200);
+                    ctx.fillStyle = `rgb(${intensity}, ${intensity}, ${intensity + 55})`;
+                    ctx.fillRect(px + 1, py + 1, cellSize - 2, cellSize - 2);
+
+                    ctx.strokeStyle = '#444';
+                    ctx.strokeRect(px, py, cellSize, cellSize);
+                }
+            }
+        }
+
+        renderCurrentPoints() {
+            const voidPoint = this.findVoid();
+            const clusterPoint = this.findCluster();
+
+            this.renderHighlight(this.canvases.void, voidPoint.x, voidPoint.y, '#ff00ff', 'Void');
+            this.renderHighlight(this.canvases.cluster, clusterPoint.x, clusterPoint.y, '#ff0000', 'Cluster');
+        }
+
+        renderHighlight(canvas, x, y, color, label) {
+            const ctx = canvas.getContext('2d');
+            const size = this.size;
+            const cellSize = this.cellSize;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const px = x * cellSize;
+                    const py = y * cellSize;
+
+                    ctx.fillStyle = this.binaryMap[y][x] ? '#333' : '#1a1a1a';
+                    ctx.fillRect(px + 2, py + 2, cellSize - 4, cellSize - 4);
+                    ctx.strokeStyle = '#444';
+                    ctx.strokeRect(px, py, cellSize, cellSize);
+                }
+            }
+
+            const px = x * cellSize;
+            const py = y * cellSize;
+            ctx.fillStyle = color;
+            ctx.fillRect(px, py, cellSize, cellSize);
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(px, py, cellSize, cellSize);
+            ctx.lineWidth = 1;
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(label, px + cellSize/2, py + cellSize - 5);
+        }
+
+        renderHistogram() {
+            const canvas = this.canvases.histogram;
+            const ctx = canvas.getContext('2d');
+            const size = this.size;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const histogram = new Array(size * size).fill(0);
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const rank = this.rankMap[y][x];
+                    if (rank >= 0) {
+                        histogram[rank]++;
+                    }
+                }
+            }
+
+            const maxCount = Math.max(...histogram.filter(v => v > 0), 1);
+            const barWidth = canvas.width / (size * size);
+
+            for (let i = 0; i < histogram.length; i++) {
+                if (histogram[i] > 0) {
+                    const barHeight = (histogram[i] / maxCount) * canvas.height;
+                    const hue = (i / (size * size)) * 360;
+                    ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
+                    ctx.fillRect(i * barWidth, canvas.height - barHeight, barWidth - 1, barHeight);
+                }
+            }
+        }
+    }
+
+    // Инициализация
+    const dbg = new VoidAndClusterDebugger(8);
+    dbg.generate();
+    dbg.render();
+</script>
+</body>
+</html>
