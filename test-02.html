@@ -5,13 +5,13 @@
     <title>Title</title>
 </head>
 <body>
-<div>ЭТОТ <b>СИНИЙ ШУМ</b> ПРОСТО <b>ИМБА</b>!</div>
 <canvas id="canvas" width="1024" height="1024" style="width: 1024px; height: 1024px"></canvas>
 <script>
     class VoidAndClusterGenerator {
-        constructor (size, sigma = 1.5) {
+        constructor (size, sigma = 1.5, smoothPhaseLength = 128) {
             this.size = size;
             this.staticSigma = sigma;
+            this.smoothPhaseLength = smoothPhaseLength;
             this.valueMap  = Array.from ({length: size}, () => Array (size).fill (0));
             this.energyMap = Array.from ({length: size}, () => Array (size).fill (0));
             this.rankMap   = Array.from ({length: size}, () => Array (size).fill (-1));
@@ -43,7 +43,7 @@
             let e = 0;
             const r = Math.ceil (sigma * 3);
 
-            if (points && points.length * 20 < 3 * r * r + 1000) {
+            if (points && 20*points.length < 3*r*r + 1000) {
                 // обход входного массива
                 for (const {x: px, y: py} of points) {
                     let dx = px - x, dy = py - y;
@@ -61,10 +61,9 @@
                 for (let dy = -r; dy <= r; dy++) {
                     const nx = (x + dx + size) % size;
                     const ny = (y + dy + size) % size;
-                    if (this.valueMap [nx] [ny]) {
-                        const d2 = dx * dx + dy * dy;
-                        e += Math.exp (-d2 / (2 * sigma * sigma));
-                    }
+                    if (!this.valueMap [nx] [ny]) continue;
+                    const d2 = dx * dx + dy * dy;
+                    e += Math.exp (-d2 / (2 * sigma * sigma));
                 }
             }
             return e;
@@ -93,7 +92,7 @@
             this.valueMap [x] [y] = this.valueMap [x] [y] ? 0 : 1;
             const r = Math.ceil (sigma * 3);
 
-            if (points && points.length * 20 < 3 * r * r + 1000) {
+            if (points && 20*points.length < 3*r*r + 1000) {
                 for (const {x: px, y: py} of points) {
                     let dx = px - x, dy = py - y;
                     if (dx >  size / 2) dx -= size;
@@ -109,7 +108,7 @@
                 for (let dy = -r; dy <= r; dy++) {
                     const nx = (x + dx + size) % size;
                     const ny = (y + dy + size) % size;
-                    if (points && !this.valueMap [nx] [ny]) continue; // массив - признак того чтобы не трогать пустоту
+                    if (points && !this.valueMap [nx] [ny]) continue; // наличие массива это значит пустоту не трогать
                     const d2 = dx * dx + dy * dy;
                     this.energyMap [nx] [ny] += delta * Math.exp (-d2 / (2 * sigma * sigma));
                 }
@@ -165,14 +164,11 @@
 
             let points = [];
             for (let x = 0; x < size; x++)
-            for (let y = 0; y < size; y++) {
-                if (this.valueMap [x] [y]) points.push ({x, y});
-            }
+            for (let y = 0; y < size; y++) if (this.valueMap [x] [y]) points.push ({x, y});
             let sigma = this.staticSigma;
             let updateAt = total / 4;
-            let smoothPhaseAt = 128;
 
-            while (points.length > smoothPhaseAt) {
+            while (points.length > this.smoothPhaseLength) {
                 const {x, y, _, i} = this.findCluster (points);
                 this.rankMap [x] [y] = fill ? total - points.length : points.length - 1;
                 points [i] = points.at (-1);
@@ -180,7 +176,7 @@
 
                 if (points.length <= updateAt) {
                     sigma = this.staticSigma * Math.sqrt (0.5 * size * size / points.length);
-                    updateAt = Math.max (updateAt / 2, smoothPhaseAt);
+                    updateAt = Math.max (updateAt / 2, this.smoothPhaseLength);
                     this.updateAllEnergy (sigma, points);
                 }
                 else {
@@ -213,14 +209,12 @@
             const size = this.size;
             const total = size * size;
             for (let x = 0; x < size; x++)
-            for (let y = 0; y < size; y++) {
-                this.valueMap [x] [y] = this.rankMap [x] [y] / total;
-            }
+            for (let y = 0; y < size; y++) this.valueMap [x] [y] = this.rankMap [x] [y] / total;
         }
     }
 
-    let size = 200;
-    const gen = new VoidAndClusterGenerator (size, 1.5);
+    let size = 160;
+    const gen = new VoidAndClusterGenerator (size, 1.5, 128);
     gen.generate ();
     const ctx = document.getElementById ('canvas').getContext('2d');
     for (let x = 0; x < size; x++)
