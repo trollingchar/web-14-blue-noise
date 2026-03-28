@@ -8,10 +8,11 @@
 <canvas id="canvas" width="1024" height="1024" style="width: 1024px; height: 1024px"></canvas>
 <script>
     class VoidAndClusterGenerator {
-        constructor (size, sigma = 1.5, smoothPhaseLength = 128) {
+        constructor (size, sigma = 1.5, smoothPhaseLength = 128, updateFrequency = 0.5) {
             this.size = size;
             this.staticSigma = sigma;
             this.smoothPhaseLength = smoothPhaseLength;
+            this.updateFrequency = updateFrequency;
             this.valueMap  = Array.from ({length: size}, () => Array (size).fill (0));
             this.energyMap = Array.from ({length: size}, () => Array (size).fill (0));
             this.rankMap   = Array.from ({length: size}, () => Array (size).fill (-1));
@@ -169,14 +170,14 @@
             let updateAt = total / 4;
 
             while (points.length > this.smoothPhaseLength) {
-                const {x, y, _, i} = this.findCluster (points);
+                const {x, y, i} = this.findCluster (points);
                 this.rankMap [x] [y] = fill ? total - points.length : points.length - 1;
                 points [i] = points.at (-1);
                 points.pop ();
 
                 if (points.length <= updateAt) {
                     sigma = this.staticSigma * Math.sqrt (0.5 * size * size / points.length);
-                    updateAt = Math.max (updateAt / 2, this.smoothPhaseLength);
+                    updateAt = Math.max (updateAt * this.updateFrequency, this.smoothPhaseLength);
                     this.updateAllEnergy (sigma, points);
                 }
                 else {
@@ -184,7 +185,7 @@
                 }
             }
             while (points.length) {
-                const {x, y, _, i} = this.findCluster (points);
+                const {x, y, i} = this.findCluster (points);
                 this.rankMap [x] [y] = fill ? total - points.length : points.length - 1;
                 points [i] = points.at (-1);
                 points.pop ();
@@ -213,9 +214,18 @@
         }
     }
 
-    let size = 160;
-    const gen = new VoidAndClusterGenerator (size, 1.5, 128);
+    let size = 200;
+    const gen = new VoidAndClusterGenerator (size, 1.5, 128, 0.9);
     gen.generate ();
+
+    const array = Array (100);
+    for (let x = 0; x < size; x++)
+    for (let y = 0; y < size; y++) {
+        const id = gen.rankMap [x] [y];
+        if (id < 100) array [id] = [x, y];
+    }
+    console.log (JSON.stringify (array));
+
     const ctx = document.getElementById ('canvas').getContext('2d');
     for (let x = 0; x < size; x++)
     for (let y = 0; y < size; y++) {
